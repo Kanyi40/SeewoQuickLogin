@@ -52,6 +52,22 @@ public class SeewoSsoGateway
     }
 
     /// <summary>
+    /// 启动网关（不抛异常的包装，供自动重试使用）。
+    /// </summary>
+    public bool TryStart(int port)
+    {
+        try
+        {
+            Start(port);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// 启动网关。优先绑定首选端口；被占用时依次尝试 24301~24304
     /// （白板客户端请求 24300 失败会自动重试 +1~+4，见 EasiNote 反编译 RetryPostRequestWithPort），
     /// 全部失败且允许时才对希沃服务做接管。
@@ -65,6 +81,7 @@ public class SeewoSsoGateway
         var bound = TryBind(port, out var bindError);
         if (!bound)
         {
+            _log?.Invoke($"绑定首选端口 {port} 失败（占用者：{DescribePortOwner(port)}；{bindError}）");
             // 端口回退：客户端失败重试范围为 port+1..port+4
             for (var p = port + 1; p <= port + 4 && !bound; p++)
             {
@@ -91,7 +108,52 @@ public class SeewoSsoGateway
         IsRunning = true;
         _cts = new CancellationTokenSource();
         _acceptLoop = Task.Run(() => AcceptLoopAsync(_cts.Token));
+        if (Port != port)
+        {
+            // 旧版白板（如 5.2.4.8772）可能没有 RetryPostRequestWithPort 端口重试逻辑，
+            // 回退端口下快捷登录可能不生效——明确提示，便于现场处置
+            _log?.Invoke($"警告：已回退到备用端口 127.0.0.1:{Port}（首选 {port} 被占用）。" +
+                         "旧版希沃白板可能不尝试备用端口，若白板不显示账号，请结束希沃服务（EasiAgent）后重启本插件。");
+        }
         _log?.Invoke($"SSO 网关已启动：127.0.0.1:{Port}");
+    }
+
+    /// <summary>查询端口占用者描述（用于诊断日志），如「EasiAgent(pid=1234)」「http.sys(系统保留)」。</summary>
+    private string DescribePortOwner(int port)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("netstat", "-ano -p tcp")
+            {
+                CreateNoWindow = true,
+                UseShellExecute = false,
+                RedirectStandardOutput = true
+            };
+            using var p = Process.Start(psi)!;
+            var output = p.StandardOutput.ReadToEnd();
+            p.WaitForExit(3000);
+
+            foreach (var line in output.Split('\n'))
+            {
+                var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length < 5 || !parts[0].Equals("TCP", StringComparison.OrdinalIgnoreCase) ||
+                    !parts[3].Equals("LISTENING", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (!parts[1].EndsWith($":{port}", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (!int.TryParse(parts[4], out var pid))
+                    continue;
+                if (pid is 4 or 0)
+                    return "http.sys(系统保留)";
+                var proc = Process.GetProcessById(pid);
+                return $"{proc.ProcessName}(pid={pid})";
+            }
+            return "未发现监听进程";
+        }
+        catch (Exception ex)
+        {
+            return $"查询失败({ex.GetType().Name})";
+        }
     }
 
     private bool TryBind(int port, out string? error)
