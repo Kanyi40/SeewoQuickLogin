@@ -1,0 +1,11 @@
+# 只上传插件源码相关内容，其余工作目录文件不入库
+/*
+!/.gitignore
+!/LICENSE
+!/README.md
+!/SeewoAutoLogin.Plugin/
+
+# 插件项目内排除构建产物与本地工具缓存
+/SeewoAutoLogin.Plugin/bin/
+/SeewoAutoLogin.Plugin/obj/
+/SeewoAutoLogin.Plugin/cipx/

@@ -1,0 +1,249 @@
+<ci:SettingsPageBase x:Class="SeewoAutoLogin.Plugin.Views.SettingsPages.SeewoSettingsPage"
+                     xmlns="https://github.com/avaloniaui"
+                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+                     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+                     xmlns:ci="http://classisland.tech/schemas/xaml/core"
+                     xmlns:vm="clr-namespace:SeewoAutoLogin.Plugin.ViewModels"
+                     mc:Ignorable="d" d:DataContext="{d:DesignInstance vm:SeewoSettingsViewModel}">
+    <Design.PreviewWith>
+        <Border Width="760" Height="900" />
+    </Design.PreviewWith>
+
+    <UserControl.Styles>
+        <!-- 板块卡片 -->
+        <Style Selector="Border.card">
+            <Setter Property="Background" Value="#14808080" />
+            <Setter Property="BorderBrush" Value="#22808080" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="8" />
+            <Setter Property="Padding" Value="16,12" />
+        </Style>
+        <!-- 账号行 -->
+        <Style Selector="Border.accountRow">
+            <Setter Property="Background" Value="#0F808080" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="Padding" Value="10,8" />
+        </Style>
+        <!-- 状态徽章 -->
+        <Style Selector="Border.badge">
+            <Setter Property="CornerRadius" Value="10" />
+            <Setter Property="Padding" Value="8,2" />
+            <Setter Property="Background" Value="#22808080" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+        <Style Selector="Border.badge.ok"><Setter Property="Background" Value="#382E7D32" /></Style>
+        <Style Selector="Border.badge.warn"><Setter Property="Background" Value="#38B8860B" /></Style>
+        <Style Selector="Border.badge.error"><Setter Property="Background" Value="#38C62828" /></Style>
+        <!-- 添加/编辑表单 -->
+        <Style Selector="Border.addForm">
+            <Setter Property="Background" Value="#0F808080" />
+            <Setter Property="BorderBrush" Value="#22808080" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="Padding" Value="12,10" />
+        </Style>
+        <!-- hosts 警示提示 -->
+        <Style Selector="Border.hintWarn">
+            <Setter Property="Background" Value="#26B8860B" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="Padding" Value="12,10" />
+        </Style>
+        <!-- 状态圆点 -->
+        <Style Selector="Ellipse.dot-ok"><Setter Property="Fill" Value="#4CAF50" /></Style>
+        <Style Selector="Ellipse.dot-warn"><Setter Property="Fill" Value="#FFB300" /></Style>
+        <Style Selector="Ellipse.dot-err"><Setter Property="Fill" Value="#E53935" /></Style>
+        <!-- 危险操作按钮 -->
+        <Style Selector="Button.danger">
+            <Setter Property="Foreground" Value="#FF7A7A" />
+        </Style>
+    </UserControl.Styles>
+
+    <ScrollViewer>
+        <StackPanel Margin="16,12" Spacing="12" MaxWidth="820" HorizontalAlignment="Stretch">
+
+            <!-- ═══ 总开关 ═══ -->
+            <Border Classes="card">
+                <Grid ColumnDefinitions="*,Auto">
+                    <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                        <TextBlock Text="启用希沃快捷登录" FontWeight="SemiBold" />
+                        <TextBlock Text="开启后在本地启动 SSO 网关（端口 24300），希沃白板登录界面将出现快捷登录入口。"
+                                   TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
+                    </StackPanel>
+                    <ToggleSwitch Grid.Column="1" IsChecked="{Binding Enabled}"
+                                  OnContent="" OffContent="" VerticalAlignment="Center" />
+                </Grid>
+            </Border>
+
+            <!-- ═══ 账号管理 ═══ -->
+            <Border Classes="card">
+                <StackPanel Spacing="10">
+                    <TextBlock Text="希沃账号" FontWeight="SemiBold" FontSize="15" />
+                    <TextBlock Text="密码使用 Windows DPAPI 加密存储，仅本机当前用户可解密。保存前会先真实登录验证，失败不保存。快捷登录列表最多展示 6 个账号。"
+                               TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
+
+                    <ItemsControl ItemsSource="{Binding Accounts}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border Classes="accountRow" Margin="0,2">
+                                    <Grid ColumnDefinitions="Auto,*,Auto">
+                                        <Panel Grid.Column="0" Width="40" Height="40" VerticalAlignment="Center">
+                                            <Border IsVisible="{Binding HasAvatarImage}" CornerRadius="20" ClipToBounds="True">
+                                                <Image Source="{Binding AvatarImage}" Width="40" Height="40"
+                                                       Stretch="UniformToFill" />
+                                            </Border>
+                                            <Border IsVisible="{Binding !HasAvatarImage}" Width="40" Height="40"
+                                                    CornerRadius="20" Background="#3F0F6CBD">
+                                                <TextBlock Text="{Binding AvatarText}" FontSize="16" FontWeight="SemiBold"
+                                                           HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                            </Border>
+                                        </Panel>
+                                        <StackPanel Grid.Column="1" Margin="12,0" VerticalAlignment="Center">
+                                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                                <TextBlock Text="{Binding Name}" FontWeight="SemiBold"
+                                                           VerticalAlignment="Center" />
+                                                <Border Classes="badge"
+                                                        Classes.ok="{Binding IsOk}"
+                                                        Classes.warn="{Binding IsWarn}"
+                                                        Classes.error="{Binding IsError}"
+                                                        Classes.neutral="{Binding IsNeutral}">
+                                                    <TextBlock Text="{Binding StatusText}" FontSize="11" />
+                                                </Border>
+                                            </StackPanel>
+                                            <TextBlock Text="{Binding SubLine}" Opacity="0.7" FontSize="12"
+                                                       TextWrapping="Wrap" />
+                                        </StackPanel>
+                                        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8"
+                                                    VerticalAlignment="Center">
+                                            <Button Content="测试登录"
+                                                    Command="{Binding $parent[ItemsControl].DataContext.TestLoginCommand}"
+                                                    CommandParameter="{Binding}" />
+                                            <Button Content="编辑"
+                                                    Command="{Binding $parent[ItemsControl].DataContext.EditAccountCommand}"
+                                                    CommandParameter="{Binding}" />
+                                            <Button Content="删除" Classes="danger"
+                                                    Command="{Binding $parent[ItemsControl].DataContext.DeleteAccountCommand}"
+                                                    CommandParameter="{Binding}" />
+                                        </StackPanel>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Content="＋ 添加账号" Classes="Accent"
+                                Command="{Binding OpenAddFormCommand}" />
+                    </StackPanel>
+
+                    <!-- 添加 / 编辑账号表单 -->
+                    <Border Classes="addForm" IsVisible="{Binding IsAddFormOpen}">
+                        <StackPanel Spacing="8">
+                            <TextBlock Text="{Binding FormTitle}" FontWeight="SemiBold" FontSize="13" />
+                            <Grid ColumnDefinitions="64,*">
+                                <TextBlock Grid.Column="0" Text="账号" VerticalAlignment="Center"
+                                           Opacity="0.7" FontSize="12.5" TextAlignment="Right" Margin="0,0,10,0" />
+                                <TextBox Grid.Column="1" Text="{Binding AddUsername}" Watermark="手机号"
+                                         IsEnabled="{Binding !IsEditMode}" />
+                            </Grid>
+                            <Grid ColumnDefinitions="64,*">
+                                <TextBlock Grid.Column="0" Text="密码" VerticalAlignment="Center"
+                                           Opacity="0.7" FontSize="12.5" TextAlignment="Right" Margin="0,0,10,0" />
+                                <TextBox Grid.Column="1" Text="{Binding AddPassword}"
+                                         Watermark="必填（编辑时留空表示不修改密码）"
+                                         PasswordChar="•" />
+                            </Grid>
+                            <Grid ColumnDefinitions="64,*">
+                                <TextBlock Grid.Column="0" Text="名称" VerticalAlignment="Center"
+                                           Opacity="0.7" FontSize="12.5" TextAlignment="Right" Margin="0,0,10,0" />
+                                <TextBox Grid.Column="1" Text="{Binding AddDisplayName}"
+                                         Watermark="选填（留空显示希沃账号昵称）" />
+                            </Grid>
+                            <StackPanel Orientation="Horizontal" Spacing="8" Margin="74,0,0,0">
+                                <Button Content="保存并测试登录" Classes="Accent"
+                                        Command="{Binding SaveAccountCommand}" />
+                                <Button Content="取消" Command="{Binding CancelAddFormCommand}" />
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <TextBlock Text="{Binding StatusMessage}" TextWrapping="Wrap"
+                               Opacity="0.85" FontSize="12" />
+                </StackPanel>
+            </Border>
+
+            <!-- ═══ 运行状态 ═══ -->
+            <Border Classes="card">
+                <StackPanel Spacing="6">
+                    <TextBlock Text="运行状态" FontWeight="SemiBold" FontSize="15" />
+                    <TextBlock Text="快捷登录依赖以下条件，异常项请按提示处理。"
+                               Opacity="0.7" FontSize="12" />
+
+                    <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,4">
+                        <Ellipse Grid.Column="0" Width="10" Height="10" VerticalAlignment="Center"
+                                 Classes.dot-ok="{Binding IsGatewayRunning}" Classes.dot-err="{Binding !IsGatewayRunning}" />
+                        <TextBlock Grid.Column="1" Margin="10,0" VerticalAlignment="Center">
+                            <Run Text="SSO 网关" FontWeight="SemiBold" />
+                            <Run Text="（本地登录服务，仅本机可访问）" FontSize="11.5" />
+                        </TextBlock>
+                        <TextBlock Grid.Column="2" Text="{Binding GatewayStatusText}"
+                                   VerticalAlignment="Center" Opacity="0.7" FontSize="12" />
+                    </Grid>
+
+                    <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,4">
+                        <Ellipse Grid.Column="0" Width="10" Height="10" VerticalAlignment="Center"
+                                 Classes.dot-ok="{Binding HostsMapped}" Classes.dot-warn="{Binding !HostsMapped}" />
+                        <TextBlock Grid.Column="1" Margin="10,0" VerticalAlignment="Center">
+                            <Run Text="hosts 映射" FontWeight="SemiBold" />
+                            <Run Text="local.id.seewo.com → 127.0.0.1" FontSize="11.5" />
+                        </TextBlock>
+                        <TextBlock Grid.Column="2" Text="{Binding HostsStatusText}"
+                                   VerticalAlignment="Center" Opacity="0.7" FontSize="12" />
+                    </Grid>
+
+                    <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,4">
+                        <Ellipse Grid.Column="0" Width="10" Height="10" VerticalAlignment="Center" Classes.dot-ok="True" />
+                        <TextBlock Grid.Column="1" Margin="10,0" VerticalAlignment="Center">
+                            <Run Text="希沃最近请求" FontWeight="SemiBold" />
+                            <Run Text="（希沃白板登录界面每 2 秒轮询一次）" FontSize="11.5" />
+                        </TextBlock>
+                        <TextBlock Grid.Column="2" Text="{Binding LastSsoRequestText}"
+                                   VerticalAlignment="Center" Opacity="0.7" FontSize="12" />
+                    </Grid>
+
+                    <!-- hosts 手动处理提示 -->
+                    <Border Classes="hintWarn" IsVisible="{Binding ShowHostsHint}">
+                        <StackPanel Spacing="6">
+                            <TextBlock TextWrapping="Wrap" FontSize="12.5">
+                                <Run Text="⚠️ hosts 映射需要手动处理。" FontWeight="SemiBold" />
+                                <Run Text="检测到 hosts 中缺少 127.0.0.1 local.id.seewo.com 映射。该文件位于 C:\Windows\System32\drivers\etc\hosts，需要管理员权限编辑，本插件不会自动修改系统文件。" />
+                            </TextBlock>
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Button Content="复制映射行" Click="OnCopyHostsLine" />
+                                <Button Content="打开 hosts 所在文件夹" Command="{Binding OpenHostsFolderCommand}" />
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </Border>
+
+            <!-- ═══ 高级 ═══ -->
+            <Border Classes="card">
+                <StackPanel Spacing="6">
+                    <TextBlock Text="高级" FontWeight="SemiBold" FontSize="15" />
+
+                    <Grid ColumnDefinitions="*,Auto" Margin="0,4">
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                            <TextBlock Text="打开数据目录" FontWeight="SemiBold" />
+                            <TextBlock Text="账号与设置存放于 ClassIsland 插件数据目录（accounts.json 中的密码为加密密文）"
+                                       Opacity="0.7" FontSize="12" TextWrapping="Wrap" />
+                        </StackPanel>
+                        <Button Grid.Column="1" Content="打开文件夹" VerticalAlignment="Center"
+                                Command="{Binding OpenDataFolderCommand}" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+        </StackPanel>
+    </ScrollViewer>
+</ci:SettingsPageBase>
