@@ -12,6 +12,9 @@ public class SeewoSession
     public string AccountId { get; init; } = "";
     public string Token { get; set; } = "";
     public SeewoUserInfo? UserInfo { get; set; }
+
+    /// <summary>令牌最近一次获取/换发的时间（UTC），用于判断是否需要续期。</summary>
+    public DateTime LastRefreshedUtc { get; set; } = DateTime.UtcNow;
 }
 
 /// <summary>
@@ -42,6 +45,9 @@ public class SeewoAuthService
 
     public SeewoSession? GetSession(string accountId) =>
         accountId != null && _sessions.TryGetValue(accountId, out var s) ? s : null;
+
+    /// <summary>移除某账号的缓存会话（删除账号时调用）。</summary>
+    public void RemoveSession(string accountId) => _sessions.TryRemove(accountId, out _);
 
     /// <summary>用密码登录并缓存会话。同账号串行化。</summary>
     public async Task<SeewoLoginResult> LoginAsync(SeewoAccount account, string password)
@@ -94,6 +100,7 @@ public class SeewoAuthService
             {
                 session.Token = result.Token;
                 session.UserInfo = result.UserInfo ?? session.UserInfo;
+                session.LastRefreshedUtc = DateTime.UtcNow;
                 account.LastError = null;
                 account.LastFailureKind = SeewoFailureKind.None;
             }

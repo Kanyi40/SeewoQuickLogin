@@ -22,6 +22,12 @@ public class SettingsStore
     private string SettingsPath => Path.Combine(Folder, "settings.json");
     private string AccountsPath => Path.Combine(Folder, "accounts.json");
 
+    /// <summary>诊断日志回调（读写异常时上报，避免静默失败）。</summary>
+    public Action<string>? Log { get; set; }
+
+    /// <summary>串行化所有文件读写——网关请求线程、设置页与后台任务会并发保存。</summary>
+    private static readonly object FileLock = new();
+
     public SettingsStore(string pluginConfigFolder)
     {
         Folder = pluginConfigFolder;
@@ -48,36 +54,65 @@ public class SettingsStore
 
     // ── 底层读写（原子写 + .bak）──────────────────────────────
 
-    private static T? Load<T>(string path) where T : class
+    private T? Load<T>(string path) where T : class
     {
-        try
+        lock (FileLock)
         {
-            if (!File.Exists(path)) return null;
-            var json = File.ReadAllText(path);
-            return JsonSerializer.Deserialize<T>(json, JsonOptions);
-        }
-        catch
-        {
-            // 主文件损坏时尝试 .bak
             try
             {
-                var bak = path + ".bak";
-                if (!File.Exists(bak)) return null;
-                return JsonSerializer.Deserialize<T>(File.ReadAllText(bak), JsonOptions);
+                if (!File.Exists(path)) return null;
+                var json = File.ReadAllText(path);
+                return JsonSerializer.Deserialize<T>(json, JsonOptions);
             }
-            catch
+            catch (Exception ex)
             {
-                return null;
+                Log?.Invoke($"{Path.GetFileName(path)} 读取失败，尝试 .bak：{ex.GetType().Name}");
+                // 主文件损坏时尝试 .bak
+                try
+                {
+                    var bak = path + ".bak";
+                    if (!File.Exists(bak)) return null;
+                    var result = JsonSerializer.Deserialize<T>(File.ReadAllText(bak), JsonOptions);
+                    if (result != null)
+                        Log?.Invoke($"{Path.GetFileName(path)} 已从 .bak 恢复（主文件损坏）");
+                    return result;
+                }
+                catch
+                {
+                    Log?.Invoke($"{Path.GetFileName(path)} 与 .bak 均无法解析，数据将按空处理");
+                    return null;
+                }
             }
         }
     }
 
-    private static void Save<T>(string path, T data)
+    private void Save<T>(string path, T data)
     {
-        var tmp = path + ".tmp";
-        File.WriteAllText(tmp, JsonSerializer.Serialize(data, JsonOptions));
-        if (File.Exists(path))
-            File.Copy(path, path + ".bak", overwrite: true);
-        File.Move(tmp, path, overwrite: true);
+        lock (FileLock)
+        {
+            var tmp = path + ".tmp";
+            var json = JsonSerializer.Serialize(data, JsonOptions);
+            for (var attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    File.WriteAllText(tmp, json);
+                    if (File.Exists(path))
+                        File.Copy(path, path + ".bak", overwrite: true);
+                    File.Move(tmp, path, overwrite: true);
+                    return;
+                }
+                catch (Exception ex) when (attempt < 3 && (ex is IOException or UnauthorizedAccessException))
+                {
+                    // 杀毒软件/索引服务短暂占用文件：退避重试
+                    Thread.Sleep(60 * (attempt + 1));
+                }
+                catch (Exception ex)
+                {
+                    Log?.Invoke($"写入 {Path.GetFileName(path)} 失败：{ex.GetType().Name}: {ex.Message}");
+                    return;
+                }
+            }
+        }
     }
 }

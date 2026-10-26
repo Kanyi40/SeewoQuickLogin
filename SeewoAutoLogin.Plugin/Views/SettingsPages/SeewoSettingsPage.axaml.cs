@@ -30,6 +30,19 @@ public partial class SeewoSettingsPage : SettingsPageBase
         _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
         _refreshTimer.Tick += (_, _) => viewModel.RefreshStatus();
         _refreshTimer.Start();
+
+        // 页面离开可视树时释放：停表 + 退订（否则每次进出设置页都会泄漏一个定时器与页面实例）
+        DetachedFromVisualTree += (_, _) =>
+        {
+            _refreshTimer.Stop();
+            _viewModel.CopyToClipboardRequested -= OnCopyToClipboardRequested;
+        };
+        AttachedToVisualTree += (_, _) =>
+        {
+            _viewModel.CopyToClipboardRequested -= OnCopyToClipboardRequested;
+            _viewModel.CopyToClipboardRequested += OnCopyToClipboardRequested;
+            if (!_refreshTimer.IsEnabled) _refreshTimer.Start();
+        };
     }
 
     private void OnCopyToClipboardRequested(string text)

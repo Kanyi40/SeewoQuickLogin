@@ -31,8 +31,10 @@ public class HostsFileService
                 var hash = line.IndexOf('#');
                 if (hash >= 0) line = line[..hash].Trim();
                 var parts = line.Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
+                // 同时接受 IPv4 / IPv6 回环地址（部分环境优先解析 ::1）
                 if (parts.Length >= 2 &&
-                    parts[0].Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase) &&
+                    (parts[0].Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase) ||
+                     parts[0].Equals("::1", StringComparison.OrdinalIgnoreCase)) &&
                     parts[1].Equals(HostName, StringComparison.OrdinalIgnoreCase))
                     return true;
             }

@@ -181,7 +181,8 @@
 
                     <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,4">
                         <Ellipse Grid.Column="0" Width="10" Height="10" VerticalAlignment="Center"
-                                 Classes.dot-ok="{Binding IsGatewayRunning}" Classes.dot-err="{Binding !IsGatewayRunning}" />
+                                 Classes.dot-ok="{Binding IsGatewayPortOk}" Classes.dot-warn="{Binding IsGatewayFallback}"
+                                 Classes.dot-err="{Binding !IsGatewayRunning}" />
                         <TextBlock Grid.Column="1" Margin="10,0" VerticalAlignment="Center">
                             <Run Text="SSO 网关" FontWeight="SemiBold" />
                             <Run Text="（本地登录服务，仅本机可访问）" FontSize="11.5" />

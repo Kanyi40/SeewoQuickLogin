@@ -21,8 +21,13 @@ public class SeewoSsoGateway
 {
     private static readonly HashSet<string> AllowedHosts = new(StringComparer.OrdinalIgnoreCase)
     {
-        HostsFileService.HostName, "127.0.0.1", "localhost"
+        HostsFileService.HostName, "127.0.0.1", "localhost", "::1"
     };
+
+    /// <summary>会话超过该时长后先尝试 token 换发再返回，避免长期运行返回过期令牌。</summary>
+    private static readonly TimeSpan SessionRefreshInterval = TimeSpan.FromMinutes(25);
+
+    private readonly object _lifecycleLock = new();
 
     private TcpListener? _listener;
     private CancellationTokenSource? _cts;
@@ -73,6 +78,14 @@ public class SeewoSsoGateway
     /// 全部失败且允许时才对希沃服务做接管。
     /// </summary>
     public void Start(int port)
+    {
+        lock (_lifecycleLock)
+        {
+            StartCore(port);
+        }
+    }
+
+    private void StartCore(int port)
     {
         if (IsRunning) return;
         Port = port;
@@ -207,14 +220,19 @@ public class SeewoSsoGateway
                     continue;
 
                 // PID 4 = http.sys（内核）：希沃服务常用 HttpListener 注册端口，
-                // 此时直接按进程名查找并结束希沃服务
+                // 此时只能按进程名处理（仅限 EasiAgent 后台服务）
                 if (pid is 4 or 0)
-                    return TryKillSeewoServiceByName();
+                    return TryKillEasiAgent();
 
                 var proc = Process.GetProcessById(pid);
                 var name = proc.ProcessName;
-                if (!name.StartsWith("EasiAgent", StringComparison.OrdinalIgnoreCase) &&
-                    !name.StartsWith("EasiNote", StringComparison.OrdinalIgnoreCase))
+                if (name.StartsWith("EasiNote", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 白板本体可能正在讲课且有未保存板书——绝不结束
+                    _log?.Invoke($"端口 {port} 被希沃白板 {name}(pid={pid}) 占用，为保护未保存的板书不做结束");
+                    return false;
+                }
+                if (!name.StartsWith("EasiAgent", StringComparison.OrdinalIgnoreCase))
                 {
                     _log?.Invoke($"端口 {port} 被非希沃进程 {name}(pid={pid}) 占用，不自动结束");
                     return false;
@@ -227,7 +245,7 @@ public class SeewoSsoGateway
                 return true;
             }
             // netstat 未找到监听项（可能为 http.sys 保留）时也按名字找
-            return TryKillSeewoServiceByName();
+            return TryKillEasiAgent();
         }
         catch (Exception ex)
         {
@@ -236,8 +254,11 @@ public class SeewoSsoGateway
         return false;
     }
 
-    /// <summary>按进程名查找并结束希沃后台服务（EasiAgent/EasiNote 系列）。</summary>
-    private bool TryKillSeewoServiceByName()
+    /// <summary>
+    /// 按进程名查找并结束希沃后台服务（<b>仅 EasiAgent 系列</b>）。
+    /// 绝不结束 EasiNote（白板本体）：老师可能正在使用且有未保存板书。
+    /// </summary>
+    private bool TryKillEasiAgent()
     {
         try
         {
@@ -246,9 +267,7 @@ public class SeewoSsoGateway
                 {
                     try
                     {
-                        var n = p.ProcessName;
-                        return n.StartsWith("EasiAgent", StringComparison.OrdinalIgnoreCase) ||
-                               n.StartsWith("EasiNote", StringComparison.OrdinalIgnoreCase);
+                        return p.ProcessName.StartsWith("EasiAgent", StringComparison.OrdinalIgnoreCase);
                     }
                     catch
                     {
@@ -258,7 +277,7 @@ public class SeewoSsoGateway
                 .ToList();
             if (victims.Count == 0)
             {
-                _log?.Invoke("未找到可结束的希沃服务进程");
+                _log?.Invoke("未找到可结束的希沃后台服务（EasiAgent）");
                 return false;
             }
             foreach (var proc in victims)
@@ -286,12 +305,18 @@ public class SeewoSsoGateway
 
     public void Stop()
     {
-        if (!IsRunning) return;
-        IsRunning = false;
-        try { _cts?.Cancel(); } catch { }
-        try { _listener?.Stop(); } catch { }
-        _log?.Invoke("SSO 网关已停止");
+        lock (_lifecycleLock)
+        {
+            if (!IsRunning) return;
+            IsRunning = false;
+            try { _cts?.Cancel(); } catch { }
+            try { _listener?.Stop(); } catch { }
+            _log?.Invoke("SSO 网关已停止");
+        }
     }
+
+    /// <summary>清除某账号的失败冷却记录（删除账号时调用，避免内存残留）。</summary>
+    public void ClearFailure(string accountId) => _failures.TryRemove(accountId, out _);
 
     // ── 连接循环 ─────────────────────────────────────────────
 
@@ -381,8 +406,12 @@ public class SeewoSsoGateway
                 remaining -= n;
             }
 
-            // Host 白名单（防任意本机进程伪造）
-            var hostName = (host ?? "").Split(':')[0];
+            // Host 白名单（防任意本机进程伪造）；兼容 IPv6 字面量 [::1]:24300
+            var hostName = (host ?? "").Trim();
+            if (hostName.StartsWith('[') && hostName.Contains(']'))
+                hostName = hostName[1..hostName.IndexOf(']')];
+            else
+                hostName = hostName.Split(':')[0];
             if (!AllowedHosts.Contains(hostName))
             {
                 await WriteJsonAsync(stream, 404, new { message = "not_found", statusCode = "404" });
@@ -427,9 +456,11 @@ public class SeewoSsoGateway
         {
             LastSsoRequestAtUtc = DateTime.UtcNow;
             var settings = _store.Settings;
+            // 配置越界保护：0/负数会让列表恒为空，过大无意义（希沃侧上限 6）
+            var maxVisible = Math.Clamp(settings.MaxVisibleAccounts, 1, 20);
             var accounts = _store.LoadAccounts()
                 .Where(a => !string.IsNullOrEmpty(a.Username))
-                .Take(settings.MaxVisibleAccounts)
+                .Take(maxVisible)
                 .ToList();
 
             // 字段类型严格按白板端 SeewoUserInfo（反编译自 EasiNote5 5.2.4.9838）：
@@ -452,7 +483,8 @@ public class SeewoSsoGateway
                 // 登录来源角标：显示 ClassIsland Logo（http URL，由本网关伺服）
                 ["pt_sysicourl"] = sysIcoUrls,
                 ["pt_session"] = a.Id,
-                ["pt_timestamp"] = DateTimeOffset.Now.ToUnixTimeMilliseconds(),
+                // 希沃自身用 DateTime.UtcNow.ToTimeStamp()，这里保持 UTC 以避免多 8 小时的"未来时间戳"
+                ["pt_timestamp"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 ["pt_type"] = "0"
             }).ToList();
 
@@ -496,14 +528,30 @@ public class SeewoSsoGateway
                 return;
             }
 
-            // 会话复用：有效会话直接返回 token，避免每次轮询都打登录接口
+            // 会话复用：有效会话直接返回 token，避免每次轮询都打登录接口。
+            // 超过 SessionRefreshInterval 先做一次 token 换发——长期运行下 token 会过期，
+            // 直接返回过期令牌会让白板点击账号必然失败。
             if (_auth.HasSession(account.Id))
             {
                 var session = _auth.GetSession(account.Id)!;
-                account.CountRequest();
-                _store.SaveAccounts(accounts);
-                await WriteLoginSuccessAsync(stream, session.Token);
-                return;
+                if (DateTime.UtcNow - session.LastRefreshedUtc <= SessionRefreshInterval)
+                {
+                    account.CountRequest();
+                    PersistAccountState(account);
+                    await WriteLoginSuccessAsync(stream, session.Token);
+                    return;
+                }
+
+                var renew = await _auth.ExchangeAsync(account);
+                if (renew.Success && _auth.GetSession(account.Id) is { } renewed)
+                {
+                    account.CountRequest();
+                    PersistAccountState(account);
+                    await WriteLoginSuccessAsync(stream, renewed.Token);
+                    return;
+                }
+                // 换发失败：会话已被清除，继续走密码登录重新获取
+                _log?.Invoke($"账号 {account.EffectiveName} 令牌换发失败（{renew.ErrorMessage}），改为密码登录");
             }
 
             // 失败冷却：60s 内不重试（防风控升级）
@@ -535,7 +583,7 @@ public class SeewoSsoGateway
             _failures.TryRemove(account.Id, out _);
             account.UserInfo = result.UserInfo ?? account.UserInfo;
             account.CountRequest();
-            _store.SaveAccounts(accounts);
+            PersistAccountState(account);
             await WriteLoginSuccessAsync(stream, result.Token);
             return;
         }
@@ -606,8 +654,40 @@ public class SeewoSsoGateway
         return _sysIconBytes;
     }
 
-    /// <summary>正在补拉资料的账号集合（防并发重复登录）。</summary>
-    private readonly HashSet<string> _profileRefreshing = new();
+    /// <summary>
+    /// 只把单个账号的最新状态合并写回磁盘：
+    /// 重新加载最新列表 → 按 Id 定位 → 覆盖字段 → 保存。
+    /// 这样后台任务不会用请求时刻的旧快照覆盖用户在设置页的新增/删除/编辑。
+    /// </summary>
+    private void PersistAccountState(SeewoAccount updated)
+    {
+        try
+        {
+            var fresh = _store.LoadAccounts();
+            var target = fresh.FirstOrDefault(a => a.Id == updated.Id);
+            if (target == null) return; // 账号已被用户删除，不回写复活
+
+            target.UserInfo = updated.UserInfo ?? target.UserInfo;
+            target.LastError = updated.LastError;
+            target.LastFailureKind = updated.LastFailureKind;
+            target.LastLoginAtUtc = updated.LastLoginAtUtc;
+            target.RequestCountToday = updated.RequestCountToday;
+            target.RequestCountDate = updated.RequestCountDate;
+            if (!string.IsNullOrEmpty(updated.EncryptedPassword))
+                target.EncryptedPassword = updated.EncryptedPassword;
+            if (!string.IsNullOrEmpty(updated.DisplayName))
+                target.DisplayName = updated.DisplayName;
+
+            _store.SaveAccounts(fresh);
+        }
+        catch (Exception ex)
+        {
+            _log?.Invoke($"保存账号状态失败：{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>正在补拉资料的账号集合（防并发重复登录；多连接线程安全）。</summary>
+    private readonly ConcurrentDictionary<string, byte> _profileRefreshing = new();
 
     /// <summary>
     /// 对缺少用户资料的账号在后台补一次登录以拉取昵称/头像。
@@ -621,9 +701,8 @@ public class SeewoSsoGateway
             if (!string.IsNullOrEmpty(account.UserInfo?.PhotoUrl)) continue;
             if (_auth.HasSession(account.Id)) continue;
             if (_failures.ContainsKey(account.Id)) continue;
-            if (!_profileRefreshing.Add(account.Id)) continue;
+            if (!_profileRefreshing.TryAdd(account.Id, 0)) continue;
 
-            var list = accounts;
             _ = Task.Run(async () =>
             {
                 try
@@ -641,8 +720,9 @@ public class SeewoSsoGateway
                 }
                 finally
                 {
-                    _profileRefreshing.Remove(account.Id);
-                    try { _store.SaveAccounts(list); } catch { }
+                    _profileRefreshing.TryRemove(account.Id, out _);
+                    // 按账号合并写回，避免旧快照覆盖用户改动
+                    PersistAccountState(account);
                 }
             });
         }
@@ -666,6 +746,11 @@ public class SeewoSsoGateway
         sb.Append("Connection: close\r\n");
         sb.Append($"Set-Cookie: pt_token={token}; Path=/; HttpOnly; SameSite=Lax\r\n");
         sb.Append($"X-Auth-Token: {token}\r\n");
+        sb.Append("Cache-Control: no-store\r\n");
+        sb.Append("Access-Control-Allow-Origin: *\r\n");
+        sb.Append("Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n");
+        sb.Append("Access-Control-Allow-Headers: Content-Type, Authorization\r\n");
+        sb.Append("Access-Control-Expose-Headers: X-Auth-Token\r\n");
         sb.Append("\r\n");
         var head = Encoding.Latin1.GetBytes(sb.ToString());
         await stream.WriteAsync(head);

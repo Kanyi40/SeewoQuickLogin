@@ -62,6 +62,12 @@ public partial class SeewoSettingsViewModel : ObservableObject
     [ObservableProperty]
     private string _hostsStatusText = "检测中…";
 
+    /// <summary>网关运行在备用端口（旧版白板可能不认，等于对白板失效）。</summary>
+    [ObservableProperty]
+    private bool _isGatewayFallback;
+
+    public bool IsGatewayPortOk => IsGatewayRunning && !IsGatewayFallback;
+
     [ObservableProperty]
     private string _lastSsoRequestText = "从未";
 
@@ -94,32 +100,39 @@ public partial class SeewoSettingsViewModel : ObservableObject
     /// </summary>
     private async void RefreshMissingProfilesInBackground()
     {
-        var missing = _accounts
-            .Where(a => !string.IsNullOrEmpty(a.EncryptedPassword) &&
-                        string.IsNullOrEmpty(a.UserInfo?.PhotoUrl) &&
-                        !_auth.HasSession(a.Id))
-            .ToList();
-        if (missing.Count == 0) return;
+        try
+        {
+            var missing = _accounts
+                .Where(a => !string.IsNullOrEmpty(a.EncryptedPassword) &&
+                            string.IsNullOrEmpty(a.UserInfo?.PhotoUrl) &&
+                            !_auth.HasSession(a.Id))
+                .ToList();
+            if (missing.Count == 0) return;
 
-        foreach (var account in missing)
-        {
-            try
+            foreach (var account in missing)
             {
-                var password = SecureStore.Unprotect(account.EncryptedPassword);
-                if (string.IsNullOrEmpty(password)) continue;
-                await _auth.LoginAsync(account, password);
+                try
+                {
+                    var password = SecureStore.Unprotect(account.EncryptedPassword);
+                    if (string.IsNullOrEmpty(password)) continue;
+                    await _auth.LoginAsync(account, password);
+                }
+                catch
+                {
+                    // 单个账号失败不影响其它账号
+                }
             }
-            catch
+            SaveAccounts();
+            Dispatcher.UIThread.Post(() =>
             {
-                // 单个账号失败不影响其它账号
-            }
+                foreach (var vm in Accounts)
+                    vm.Refresh(vm.Account);
+            });
         }
-        SaveAccounts();
-        Dispatcher.UIThread.Post(() =>
+        catch
         {
-            foreach (var vm in Accounts)
-                vm.Refresh(vm.Account);
-        });
+            // 后台自愈失败不能影响应用（async void 的异常会终止进程）
+        }
     }
 
     // ── 数据装载 ─────────────────────────────────────────────
@@ -138,8 +151,11 @@ public partial class SeewoSettingsViewModel : ObservableObject
     public void RefreshStatus()
     {
         IsGatewayRunning = _gateway.IsRunning;
+        IsGatewayFallback = _gateway.IsRunning && _gateway.Port != _store.Settings.GatewayPort;
         GatewayStatusText = _gateway.IsRunning
-            ? $"127.0.0.1:{_gateway.Port} · 运行中"
+            ? (IsGatewayFallback
+                ? $"127.0.0.1:{_gateway.Port} · 备用端口（旧版白板可能不识别，请检查希沃服务占用）"
+                : $"127.0.0.1:{_gateway.Port} · 运行中")
             : (_gateway.LastStartError ?? "未运行");
         HostsMapped = _hosts.HasMapping();
         HostsStatusText = HostsMapped ? "已生效" : "未生效";
@@ -147,6 +163,7 @@ public partial class SeewoSettingsViewModel : ObservableObject
             ? $"{(long)(DateTime.UtcNow - t).TotalSeconds} 秒前"
             : "从未";
         OnPropertyChanged(nameof(ShowHostsHint));
+        OnPropertyChanged(nameof(IsGatewayPortOk));
     }
 
     public void RefreshAccount(AccountVm vm) => vm.Refresh(vm.Account);
@@ -159,15 +176,20 @@ public partial class SeewoSettingsViewModel : ObservableObject
         _store.SaveSettings();
         if (value)
         {
-            try
+            // 启动可能在端口被占用时阻塞数秒（接管希沃服务），必须放到后台线程，避免卡住 UI
+            StatusMessage = "正在启动 SSO 网关…";
+            var port = _store.Settings.GatewayPort;
+            _ = Task.Run(() =>
             {
-                _gateway.Start(_store.Settings.GatewayPort);
-                StatusMessage = "SSO 网关已启动";
-            }
-            catch (Exception ex)
-            {
-                StatusMessage = $"网关启动失败（端口 {_store.Settings.GatewayPort} 可能被希沃 EasiAgent 或其它程序占用）：{ex.Message}";
-            }
+                var ok = _gateway.TryStart(port);
+                Dispatcher.UIThread.Post(() =>
+                {
+                    StatusMessage = ok
+                        ? $"SSO 网关已启动：127.0.0.1:{_gateway.Port}"
+                        : $"网关启动失败：{_gateway.LastStartError}";
+                    RefreshStatus();
+                });
+            });
         }
         else
         {
@@ -230,7 +252,8 @@ public partial class SeewoSettingsViewModel : ObservableObject
             StatusMessage = "账号和密码为必填项";
             return;
         }
-        if (existing == null && _accounts.Any(a => a.Username == username))
+        // 判重：新增时不能与任何账号重复；编辑时不能与"其它"账号重复
+        if (_accounts.Any(a => a.Id != existing?.Id && a.Username == username))
         {
             StatusMessage = "该账号已存在";
             return;
@@ -314,9 +337,16 @@ public partial class SeewoSettingsViewModel : ObservableObject
             return;
         }
 
+        // 已有会话时直接回报有效，避免每次点击都打希沃登录接口（降低风控风险）
+        if (_auth.HasSession(account.Id))
+        {
+            StatusMessage = "会话仍然有效（未重复请求希沃登录接口）";
+            vm.Refresh(account);
+            return;
+        }
+
         StatusMessage = $"正在测试登录：{account.EffectiveName}…";
-        var result = await _auth.LoginAsync(account, password);
-        if (result.Success)
+        var result = await _auth.LoginAsync(account, password);        if (result.Success)
         {
             StatusMessage = $"登录成功：{result.UserInfo?.NickName ?? account.EffectiveName}";
         }
@@ -336,6 +366,9 @@ public partial class SeewoSettingsViewModel : ObservableObject
         _accounts.Remove(account);
         SaveAccounts();
         Accounts.Remove(vm);
+        // 清理运行时缓存，避免残留会话/冷却记录
+        _auth.RemoveSession(account.Id);
+        _gateway.ClearFailure(account.Id);
         StatusMessage = $"已删除账号：{account.EffectiveName}";
     }
 

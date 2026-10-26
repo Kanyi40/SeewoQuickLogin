@@ -19,6 +19,7 @@ public enum AccountStatusKind
 public partial class AccountVm : ObservableObject
 {
     private static readonly HttpClient AvatarHttp = new() { Timeout = TimeSpan.FromSeconds(15) };
+    private const int MaxAvatarBytes = 5 * 1024 * 1024;
     private string _loadedPhotoUrl = "";
 
     public SeewoAccount Account { get; }
@@ -124,21 +125,31 @@ public partial class AccountVm : ObservableObject
         if (string.IsNullOrWhiteSpace(url))
         {
             _loadedPhotoUrl = "";
-            AvatarImage = null;
+            DisposeAvatar();
             return;
         }
         if (url == _loadedPhotoUrl && AvatarImage != null) return;
         try
         {
             var bytes = await AvatarHttp.GetByteArrayAsync(url);
+            if (bytes.Length == 0 || bytes.Length > MaxAvatarBytes) return; // 异常/超大图不加载
             using var ms = new MemoryStream(bytes);
             var bmp = new Bitmap(ms);
             _loadedPhotoUrl = url;
+            DisposeAvatar();
             AvatarImage = bmp;
         }
         catch
         {
             // 拉取失败：保持字母头像，不打断界面
         }
+    }
+
+    /// <summary>释放上一张头像的位图（Avalonia Bitmap 持有非托管内存）。</summary>
+    private void DisposeAvatar()
+    {
+        var old = AvatarImage;
+        AvatarImage = null;
+        try { old?.Dispose(); } catch { }
     }
 }
