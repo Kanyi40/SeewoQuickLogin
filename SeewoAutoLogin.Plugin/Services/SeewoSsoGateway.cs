@@ -82,21 +82,25 @@ public class SeewoSsoGateway
         if (!bound)
         {
             _log?.Invoke($"绑定首选端口 {port} 失败（占用者：{DescribePortOwner(port)}；{bindError}）");
-            // 端口回退：客户端失败重试范围为 port+1..port+4
+
+            // 接管优先：24300 是新旧客户端唯一共同端口。被希沃服务（EasiAgent 等）占用时
+            // 直接结束它抢回首选端口，而不是先回退——旧版客户端（如 5.2.4.8772）不重试
+            // 备用端口，回退成功对白板等于失效（2026-10-26 学校大屏 gateway.log 实证）。
+            if (_store.Settings.AutoTakeOverPort && TryStopSeewoServiceOnPort(port))
+            {
+                for (var i = 0; i < 3 && !bound; i++)
+                {
+                    Thread.Sleep(1200);
+                    bound = TryBind(port, out bindError);
+                    if (bound) Port = port;
+                }
+            }
+
+            // 接管失败或被禁止：回退到客户端重试范围端口兜底
             for (var p = port + 1; p <= port + 4 && !bound; p++)
             {
                 bound = TryBind(p, out bindError);
                 if (bound) Port = p;
-            }
-        }
-        if (!bound && _store.Settings.AutoTakeOverPort && TryStopSeewoServiceOnPort(port))
-        {
-            // EasiAgent 被结束后希沃可能立刻重新拉起，重试绑定几次
-            for (var i = 0; i < 3 && !bound; i++)
-            {
-                Thread.Sleep(1200);
-                bound = TryBind(port, out bindError);
-                if (bound) Port = port;
             }
         }
         if (!bound)
