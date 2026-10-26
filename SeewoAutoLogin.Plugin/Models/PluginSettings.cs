@@ -21,4 +21,17 @@ public class PluginSettings
     /// 仅对希沃进程名生效，其它进程占用不处理。
     /// </summary>
     public bool AutoTakeOverPort { get; set; } = true;
+
+    /// <summary>
+    /// 每次网关启动/自检时自动补写 hosts 映射。
+    /// 班级大屏常装冰点还原：C 盘的 hosts 在重启后被还原，必须靠该开关每天自动补写。
+    /// 写入需要管理员权限，失败会记录日志并在设置页提示。
+    /// </summary>
+    public bool AutoWriteHosts { get; set; }
+
+    /// <summary>
+    /// 24300 被希沃白板本体（EasiNote）占用时是否也强制结束它。
+    /// 默认 false：保护老师正在使用、未保存的板书。仅在确认无人使用白板时开启。
+    /// </summary>
+    public bool ForceTakeOverEasiNote { get; set; }
 }

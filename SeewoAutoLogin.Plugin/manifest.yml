@@ -2,7 +2,7 @@ id: kanyi.easiquick
 name: 希沃快捷登录
 description: 管理希沃账号，通过本地 SSO 网关为希沃白板提供快捷登录。
 entranceAssembly: "SeewoAutoLogin.Plugin.dll"
-version: 0.2.2.0
+version: 0.2.3.0
 apiVersion: 2.0.0.0
 icon: icon.ico
 author: 戡弈

@@ -45,4 +45,42 @@ public class HostsFileService
         }
         return false;
     }
+
+    /// <summary>
+    /// 补写 hosts 映射（供 AutoWriteHosts 使用）。已有映射时直接返回成功。
+    /// 需要管理员权限；写入前备份为 hosts.seewo.bak，失败时返回 false 并给出原因。
+    /// </summary>
+    public bool TryEnsureMapping(out string message)
+    {
+        if (HasMapping())
+        {
+            message = "hosts 映射已存在";
+            return true;
+        }
+        try
+        {
+            var content = File.Exists(HostsPath) ? File.ReadAllText(HostsPath) : "";
+            // 备份一次（保留最近一次原始 hosts）
+            try
+            {
+                if (File.Exists(HostsPath))
+                    File.Copy(HostsPath, HostsPath + ".seewo.bak", overwrite: true);
+            }
+            catch
+            {
+                // 备份失败不阻断写入
+            }
+            var append = (content.Length > 0 && !content.EndsWith('\n') ? "\n" : "")
+                         + "# Added by ClassIsland SeewoQuickLogin\n"
+                         + MappingLine + "\n";
+            File.AppendAllText(HostsPath, append);
+            message = $"已写入 hosts 映射：{MappingLine}";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            message = $"写入 hosts 失败（通常是没有管理员权限或文件被占用）：{ex.GetType().Name}";
+            return false;
+        }
+    }
 }

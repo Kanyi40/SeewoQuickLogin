@@ -24,7 +24,12 @@ public class SeewoGatewayHostedService : IHostedService
     private static readonly TimeSpan RetryInterval = TimeSpan.FromSeconds(30);
 
     /// <summary>运行在备用端口时，尝试升级回首选端口的间隔。</summary>
-    private static readonly TimeSpan UpgradeInterval = TimeSpan.FromMinutes(10);
+    /// <remarks>
+    /// 希沃客户端（含 5.2.4.8772）只在 24300 返回非 200 时才换端口，
+    /// 只要 24300 上有程序正常应答就永远到不了备用端口 —— 因此挂到备用端口等于失效，
+    /// 需要较频繁地尝试抢回首选端口（30s 周期检查，60s 一次升级尝试）。
+    /// </remarks>
+    private static readonly TimeSpan UpgradeInterval = TimeSpan.FromSeconds(60);
 
     public SeewoGatewayHostedService(
         SeewoSsoGateway gateway, SettingsStore store, HostsFileService hosts,
@@ -41,6 +46,7 @@ public class SeewoGatewayHostedService : IHostedService
         _store.LoadSettings();
         if (_store.Settings.Enabled)
         {
+            EnsureHostsIfEnabled();
             TryStartGateway();
         }
 
@@ -49,6 +55,21 @@ public class SeewoGatewayHostedService : IHostedService
         _ = Task.Run(() => RetryLoopAsync(_retryCts.Token));
 
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// AutoWriteHosts 开启时补写 hosts 映射。
+    /// 冰点还原/还原卡机器每次重启都会丢失映射，靠这里在上电后自愈。
+    /// </summary>
+    private void EnsureHostsIfEnabled()
+    {
+        if (!_store.Settings.AutoWriteHosts) return;
+        if (_hosts.HasMapping()) return;
+
+        if (_hosts.TryEnsureMapping(out var message))
+            _logger?.LogInformation("hosts 自愈：{Message}", message);
+        else
+            _logger?.LogWarning("hosts 自愈失败：{Message}", message);
     }
 
     public Task StopAsync(CancellationToken cancellationToken)
@@ -68,6 +89,8 @@ public class SeewoGatewayHostedService : IHostedService
                 _store.LoadSettings();
                 if (!_store.Settings.Enabled)
                     continue;
+
+                EnsureHostsIfEnabled();
 
                 if (!_gateway.IsRunning)
                 {

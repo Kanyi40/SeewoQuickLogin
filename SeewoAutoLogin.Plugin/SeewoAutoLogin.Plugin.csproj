@@ -7,7 +7,7 @@
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <CreateCipx>true</CreateCipx>
     <ClassIslandPluginSdkVersion>2.0.0.*</ClassIslandPluginSdkVersion>
-    <Version>0.2.2.0</Version>
+    <Version>0.2.3.0</Version>
     <!-- 本机未安装 PowerShell Core：用 tools/pwsh-md5.cmd（Python 复刻）替代 pwsh 生成 cipx 校验 -->
     <PowershellBinaryName>$(MSBuildProjectDirectory)\tools\pwsh-md5.cmd</PowershellBinaryName>
   </PropertyGroup>

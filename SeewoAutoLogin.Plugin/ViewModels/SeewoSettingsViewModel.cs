@@ -28,6 +28,14 @@ public partial class SeewoSettingsViewModel : ObservableObject
     [ObservableProperty]
     private bool _isAddFormOpen;
 
+    /// <summary>自动补写 hosts（冰点还原环境必备）。</summary>
+    [ObservableProperty]
+    private bool _autoWriteHosts;
+
+    /// <summary>24300 被白板本体占用时是否强制结束它。</summary>
+    [ObservableProperty]
+    private bool _forceTakeOverEasiNote;
+
     [ObservableProperty]
     private string _addUsername = "";
 
@@ -89,6 +97,8 @@ public partial class SeewoSettingsViewModel : ObservableObject
 
         _store.LoadSettings();
         _enabled = _store.Settings.Enabled;
+        _autoWriteHosts = _store.Settings.AutoWriteHosts;
+        _forceTakeOverEasiNote = _store.Settings.ForceTakeOverEasiNote;
         LoadAccounts();
         RefreshStatus();
         RefreshMissingProfilesInBackground();
@@ -197,6 +207,35 @@ public partial class SeewoSettingsViewModel : ObservableObject
             StatusMessage = "SSO 网关已停止";
         }
         RefreshStatus();
+    }
+
+    // ── 部署环境选项 ─────────────────────────────────────────
+
+    partial void OnAutoWriteHostsChanged(bool value)
+    {
+        _store.Settings.AutoWriteHosts = value;
+        _store.SaveSettings();
+        if (value)
+        {
+            if (_hosts.TryEnsureMapping(out var message))
+                StatusMessage = message;
+            else
+                StatusMessage = $"开启成功，但当前补写失败：{message}（请以管理员身份运行 ClassIsland）";
+            RefreshStatus();
+        }
+        else
+        {
+            StatusMessage = "已关闭 hosts 自动补写";
+        }
+    }
+
+    partial void OnForceTakeOverEasiNoteChanged(bool value)
+    {
+        _store.Settings.ForceTakeOverEasiNote = value;
+        _store.SaveSettings();
+        StatusMessage = value
+            ? "已开启：24300 被白板本体占用时会结束白板进程（注意未保存内容风险）"
+            : "已关闭：白板本体占用端口时不再结束它";
     }
 
     // ── 添加账号 ─────────────────────────────────────────────

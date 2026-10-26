@@ -228,9 +228,18 @@ public class SeewoSsoGateway
                 var name = proc.ProcessName;
                 if (name.StartsWith("EasiNote", StringComparison.OrdinalIgnoreCase))
                 {
-                    // 白板本体可能正在讲课且有未保存板书——绝不结束
-                    _log?.Invoke($"端口 {port} 被希沃白板 {name}(pid={pid}) 占用，为保护未保存的板书不做结束");
-                    return false;
+                    if (!_store.Settings.ForceTakeOverEasiNote)
+                    {
+                        // 白板本体可能正在讲课且有未保存板书——默认绝不结束
+                        _log?.Invoke($"端口 {port} 被希沃白板 {name}(pid={pid}) 占用；" +
+                                     "默认不结束白板以保护未保存的板书（如需强制接管请在设置页开启「端口被希沃白板本体占用时也强制接管」）");
+                        return false;
+                    }
+                    _log?.Invoke($"端口 {port} 被希沃白板 {name}(pid={pid}) 占用，已开启强制接管，结束该进程");
+                    proc.Kill();
+                    proc.WaitForExit(3000);
+                    Thread.Sleep(800);
+                    return true;
                 }
                 if (!name.StartsWith("EasiAgent", StringComparison.OrdinalIgnoreCase))
                 {

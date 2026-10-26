@@ -75,6 +75,31 @@
                 </Grid>
             </Border>
 
+            <!-- ═══ 班级大屏/机房环境选项 ═══ -->
+            <Border Classes="card">
+                <StackPanel Spacing="10">
+                    <TextBlock Text="部署环境" FontWeight="SemiBold" FontSize="15" />
+                    <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                            <TextBlock Text="自动写入 hosts 映射" FontWeight="SemiBold" />
+                            <TextBlock Text="每次启动网关时检查并自动补写「127.0.0.1 local.id.seewo.com」（需管理员权限）。C 盘有冰点还原/还原卡的机器必须开启，否则重启后映射丢失。"
+                                       TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" IsChecked="{Binding AutoWriteHosts}"
+                                      OnContent="" OffContent="" VerticalAlignment="Center" />
+                    </Grid>
+                    <Grid ColumnDefinitions="*,Auto">
+                        <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                            <TextBlock Text="端口被希沃白板本体占用时也强制接管" FontWeight="SemiBold" />
+                            <TextBlock Text="默认关闭以保护未保存的板书。开启后若 24300 被 EasiNote 占用会结束白板进程（有丢失未保存内容的风险），仅在确认现场无人使用白板时开启。"
+                                       TextWrapping="Wrap" Opacity="0.7" FontSize="12" />
+                        </StackPanel>
+                        <ToggleSwitch Grid.Column="1" IsChecked="{Binding ForceTakeOverEasiNote}"
+                                      OnContent="" OffContent="" VerticalAlignment="Center" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+
             <!-- ═══ 账号管理 ═══ -->
             <Border Classes="card">
                 <StackPanel Spacing="10">
