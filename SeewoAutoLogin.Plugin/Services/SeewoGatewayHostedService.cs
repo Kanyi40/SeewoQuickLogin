@@ -20,16 +20,16 @@ public class SeewoGatewayHostedService : IHostedService
     private CancellationTokenSource? _retryCts;
     private DateTime _lastUpgradeAttemptUtc = DateTime.MinValue;
 
-    /// <summary>网关启动失败后的自动重试间隔。</summary>
-    private static readonly TimeSpan RetryInterval = TimeSpan.FromSeconds(30);
+    /// <summary>网关启动失败 / 处于备用端口时的自检周期（配合 20 秒升级间隔，约每 20~30 秒重试一次接管）。</summary>
+    private static readonly TimeSpan RetryInterval = TimeSpan.FromSeconds(10);
 
     /// <summary>运行在备用端口时，尝试升级回首选端口的间隔。</summary>
     /// <remarks>
-    /// 希沃客户端（含 5.2.4.8772）只在 24300 返回非 200 时才换端口，
-    /// 只要 24300 上有程序正常应答就永远到不了备用端口 —— 因此挂到备用端口等于失效，
-    /// 需要较频繁地尝试抢回首选端口（30s 周期检查，60s 一次升级尝试）。
+    /// 希沃客户端只在 24300 返回非 200 时才换端口，只要 24300 有程序正常应答就永远到不了
+    /// 备用端口 —— 挂到备用端口等于失效。而杀完 EasiAgent 后希沃守护进程会在数百毫秒内
+    /// 重启它并重占端口，单次接管常常失败，因此用较短周期（20 秒）反复尝试。
     /// </remarks>
-    private static readonly TimeSpan UpgradeInterval = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan UpgradeInterval = TimeSpan.FromSeconds(20);
 
     public SeewoGatewayHostedService(
         SeewoSsoGateway gateway, SettingsStore store, HostsFileService hosts,
@@ -112,6 +112,7 @@ public class SeewoGatewayHostedService : IHostedService
                     && DateTime.UtcNow - _lastUpgradeAttemptUtc >= UpgradeInterval)
                 {
                     _lastUpgradeAttemptUtc = DateTime.UtcNow;
+                    _gateway.Note($"网关在备用端口 {_gateway.Port}，尝试抢回首选端口 {_store.Settings.GatewayPort}");
                     _logger?.LogInformation(
                         "网关当前在备用端口 {Port}，尝试升级回首选端口 {Preferred}",
                         _gateway.Port, _store.Settings.GatewayPort);

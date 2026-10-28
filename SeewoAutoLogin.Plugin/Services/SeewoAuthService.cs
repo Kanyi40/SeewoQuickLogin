@@ -84,7 +84,14 @@ public class SeewoAuthService
         }
     }
 
-    /// <summary>换发（续期）某账号的当前 token。失败时清除会话。</summary>
+    /// <summary>
+    /// 换发（续期）某账号的当前 token。
+    /// <para>
+    /// 注意：<b>当前未被使用</b>。2026-10-28 学校实测表明换发得到的令牌会被白板判为
+    /// 「登录信息已过期」（白板立即 SSOLOGOUT 并重新取令牌），因此网关改为会话超过
+    /// 20 分钟后直接清会话、用保存的密码重新登录。保留此方法以备希沃后续修正换发行为。
+    /// </para>
+    /// </summary>
     public async Task<SeewoLoginResult> ExchangeAsync(SeewoAccount account)
     {
         var gate = _gates.GetOrAdd(account.Id, _ => new SemaphoreSlim(1, 1));

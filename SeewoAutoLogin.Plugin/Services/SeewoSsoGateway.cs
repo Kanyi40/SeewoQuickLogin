@@ -24,8 +24,22 @@ public class SeewoSsoGateway
         HostsFileService.HostName, "127.0.0.1", "localhost", "::1"
     };
 
-    /// <summary>会话超过该时长后先尝试 token 换发再返回，避免长期运行返回过期令牌。</summary>
-    private static readonly TimeSpan SessionRefreshInterval = TimeSpan.FromMinutes(25);
+    /// <summary>会话超过该时长后放弃复用，改为密码重新登录。</summary>
+    /// <remarks>
+    /// 不用 token 换发接口：实测（2026-10-28 学校日志）换发得到的令牌会被白板判为
+    /// 「登录信息已过期」——白板立即 SSOLOGOUT 并重新取令牌。密码复登是已验证可用的路径。
+    /// </remarks>
+    private static readonly TimeSpan SessionRefreshInterval = TimeSpan.FromMinutes(20);
+
+    /// <summary>
+    /// 单次启动内接管端口的最大持续时间。
+    /// 不设太长：Start 在宿主启动线程上执行，过长会拖慢 ClassIsland 启动；
+    /// 更长时间的反复尝试交给 HostedService 的 20 秒升级循环（后台执行）。
+    /// </summary>
+    private const int TakeOverWindowMs = 4000;
+
+    /// <summary>接管期间的紧逼重试间隔（希沃守护进程会在数百毫秒内重启 EasiAgent）。</summary>
+    private const int TakeOverRetryMs = 80;
 
     private readonly object _lifecycleLock = new();
 
@@ -99,13 +113,32 @@ public class SeewoSsoGateway
             // 接管优先：24300 是新旧客户端唯一共同端口。被希沃服务（EasiAgent 等）占用时
             // 直接结束它抢回首选端口，而不是先回退——旧版客户端（如 5.2.4.8772）不重试
             // 备用端口，回退成功对白板等于失效（2026-10-26 学校大屏 gateway.log 实证）。
-            if (_store.Settings.AutoTakeOverPort && TryStopSeewoServiceOnPort(port))
+            //
+            // 关键时序（2026-10-28 学校日志实证）：杀掉 EasiAgent 后，希沃守护进程会在
+            // 数百毫秒内把它重新拉起并重新占住 24300。因此不能"杀完睡 1.2 秒再绑"——
+            // 必须在杀完之后立刻以 80ms 间隔紧逼重试，必要时在窗口期内重复结束 EasiAgent。
+            if (_store.Settings.AutoTakeOverPort)
             {
-                for (var i = 0; i < 3 && !bound; i++)
+                var deadline = DateTime.UtcNow.AddMilliseconds(TakeOverWindowMs);
+                var kills = 0;
+                while (!bound && DateTime.UtcNow < deadline && kills < 10)
                 {
-                    Thread.Sleep(1200);
-                    bound = TryBind(port, out bindError);
-                    if (bound) Port = port;
+                    if (TryStopSeewoServiceOnPort(port))
+                        kills++;
+
+                    // 紧逼绑定一个小窗口，抢在守护进程重启 EasiAgent 之前占住端口
+                    var sliceEnd = DateTime.UtcNow.AddMilliseconds(1200);
+                    while (!bound && DateTime.UtcNow < sliceEnd)
+                    {
+                        bound = TryBind(port, out bindError);
+                        if (bound)
+                        {
+                            Port = port;
+                            _log?.Invoke($"已在第 {kills} 次接管后占住端口 {port}");
+                            break;
+                        }
+                        Thread.Sleep(TakeOverRetryMs);
+                    }
                 }
             }
 
@@ -238,7 +271,7 @@ public class SeewoSsoGateway
                     _log?.Invoke($"端口 {port} 被希沃白板 {name}(pid={pid}) 占用，已开启强制接管，结束该进程");
                     proc.Kill();
                     proc.WaitForExit(3000);
-                    Thread.Sleep(800);
+                    Thread.Sleep(50);
                     return true;
                 }
                 if (!name.StartsWith("EasiAgent", StringComparison.OrdinalIgnoreCase))
@@ -250,7 +283,7 @@ public class SeewoSsoGateway
                 _log?.Invoke($"端口 {port} 被希沃服务 {name}(pid={pid}) 占用，自动结束以接管（希沃会自行重新拉起它）");
                 proc.Kill();
                 proc.WaitForExit(3000);
-                Thread.Sleep(800);
+                Thread.Sleep(50);
                 return true;
             }
             // netstat 未找到监听项（可能为 http.sys 保留）时也按名字找
@@ -302,7 +335,7 @@ public class SeewoSsoGateway
                     _log?.Invoke($"结束 {proc.ProcessName} 失败：{ex.Message}");
                 }
             }
-            Thread.Sleep(800);
+            Thread.Sleep(50);
             return true;
         }
         catch (Exception ex)
@@ -326,6 +359,9 @@ public class SeewoSsoGateway
 
     /// <summary>清除某账号的失败冷却记录（删除账号时调用，避免内存残留）。</summary>
     public void ClearFailure(string accountId) => _failures.TryRemove(accountId, out _);
+
+    /// <summary>写一条网关日志（供宿主服务记录生命周期事件，便于现场诊断）。</summary>
+    public void Note(string message) => _log?.Invoke(message);
 
     // ── 连接循环 ─────────────────────────────────────────────
 
@@ -538,8 +574,8 @@ public class SeewoSsoGateway
             }
 
             // 会话复用：有效会话直接返回 token，避免每次轮询都打登录接口。
-            // 超过 SessionRefreshInterval 先做一次 token 换发——长期运行下 token 会过期，
-            // 直接返回过期令牌会让白板点击账号必然失败。
+            // 超过 SessionRefreshInterval 放弃复用并清掉会话，改走密码重新登录——
+            // 换发接口产出的令牌会被白板判为「登录信息已过期」（2026-10-28 学校日志实证）。
             if (_auth.HasSession(account.Id))
             {
                 var session = _auth.GetSession(account.Id)!;
@@ -551,16 +587,8 @@ public class SeewoSsoGateway
                     return;
                 }
 
-                var renew = await _auth.ExchangeAsync(account);
-                if (renew.Success && _auth.GetSession(account.Id) is { } renewed)
-                {
-                    account.CountRequest();
-                    PersistAccountState(account);
-                    await WriteLoginSuccessAsync(stream, renewed.Token);
-                    return;
-                }
-                // 换发失败：会话已被清除，继续走密码登录重新获取
-                _log?.Invoke($"账号 {account.EffectiveName} 令牌换发失败（{renew.ErrorMessage}），改为密码登录");
+                _auth.RemoveSession(account.Id);
+                _log?.Invoke($"账号 {account.EffectiveName} 的会话已超过 {SessionRefreshInterval.TotalMinutes:0} 分钟，改为密码重新登录");
             }
 
             // 失败冷却：60s 内不重试（防风控升级）
