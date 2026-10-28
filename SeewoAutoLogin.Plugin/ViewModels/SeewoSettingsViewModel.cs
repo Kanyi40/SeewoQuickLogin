@@ -76,6 +76,28 @@ public partial class SeewoSettingsViewModel : ObservableObject
 
     public bool IsGatewayPortOk => IsGatewayRunning && !IsGatewayFallback;
 
+    /// <summary>当前进程是否以管理员身份运行（接管端口、写 hosts 的关键前提）。</summary>
+    public bool IsElevated { get; } = DetectElevated();
+
+    public string ElevationText => IsElevated
+        ? "已获管理员权限"
+        : "未以管理员身份运行：无法接管 24300 端口或写入 hosts，建议右键「以管理员身份运行」";
+
+    public bool IsNotElevated => !IsElevated;
+
+    private static bool DetectElevated()
+    {
+        try
+        {
+            // .NET 8 提供的权限判断，避免额外引用 Windows 身份相关包
+            return Environment.IsPrivilegedProcess;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     [ObservableProperty]
     private string _lastSsoRequestText = "从未";
 
@@ -177,6 +199,63 @@ public partial class SeewoSettingsViewModel : ObservableObject
     }
 
     public void RefreshAccount(AccountVm vm) => vm.Refresh(vm.Account);
+
+    /// <summary>
+    /// 一键修复：开启网关 → 补写 hosts（如开启自动写入）→ 等待接管结果，并汇总提示。
+    /// 面向公众用户：不必理解端口/hosts 概念，一次点击把能自动做的都做掉。
+    /// </summary>
+    [RelayCommand]
+    private async Task FixAllAsync()
+    {
+        var steps = new List<string>();
+
+        if (!Enabled)
+        {
+            Enabled = true; // 触发 OnEnabledChanged 启动网关
+            steps.Add("已开启快捷登录");
+        }
+
+        if (!_hosts.HasMapping())
+        {
+            if (TryWriteHosts(out var msg))
+                steps.Add(msg);
+            else
+                steps.Add($"hosts 未能自动写入：{msg}");
+        }
+        else
+        {
+            steps.Add("hosts 映射正常");
+        }
+
+        // 给后台接管一点时间（端口被 EasiAgent 占用时需要结束并抢占）
+        await Task.Delay(TimeSpan.FromSeconds(3));
+        RefreshStatus();
+
+        steps.Add(_gateway.IsRunning
+            ? (IsGatewayFallback
+                ? $"网关运行在备用端口 {_gateway.Port}，正在后台继续尝试抢回 24300"
+                : $"网关运行正常（127.0.0.1:{_gateway.Port}）")
+            : $"网关未运行：{_gateway.LastStartError ?? "未知原因"}");
+
+        if (HostsMapped)
+            steps.Add("修改 hosts 后请重启希沃白板，让它重新解析域名");
+
+        StatusMessage = string.Join("；", steps);
+    }
+
+    /// <summary>按当前设置尝试写入 hosts（受 AutoWriteHosts 与管理员权限限制）。</summary>
+    private bool TryWriteHosts(out string message)
+    {
+        try
+        {
+            return _hosts.TryEnsureMapping(out message);
+        }
+        catch (Exception ex)
+        {
+            message = ex.Message;
+            return false;
+        }
+    }
 
     // ── 总开关 ───────────────────────────────────────────────
 

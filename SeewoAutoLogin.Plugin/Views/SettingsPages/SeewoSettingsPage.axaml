@@ -237,6 +237,17 @@
                                    VerticalAlignment="Center" Opacity="0.7" FontSize="12" />
                     </Grid>
 
+                    <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,4">
+                        <Ellipse Grid.Column="0" Width="10" Height="10" VerticalAlignment="Center"
+                                 Classes.dot-ok="{Binding IsElevated}" Classes.dot-warn="{Binding IsNotElevated}" />
+                        <TextBlock Grid.Column="1" Margin="10,0" VerticalAlignment="Center">
+                            <Run Text="运行权限" FontWeight="SemiBold" />
+                        </TextBlock>
+                        <TextBlock Grid.Column="2" Text="{Binding ElevationText}"
+                                   VerticalAlignment="Center" Opacity="0.7" FontSize="12" MaxWidth="360"
+                                   TextWrapping="Wrap" TextAlignment="Right" />
+                    </Grid>
+
                     <!-- hosts 手动处理提示 -->
                     <Border Classes="hintWarn" IsVisible="{Binding ShowHostsHint}">
                         <StackPanel Spacing="6">
@@ -250,6 +261,14 @@
                             </StackPanel>
                         </StackPanel>
                     </Border>
+
+                    <!-- 公众场景一键修复 -->
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Content="一键修复" Command="{Binding FixAllCommand}"
+                                ToolTip.Tip="开启快捷登录、补写 hosts 并检查网关状态" />
+                        <TextBlock Text="自动完成能在本机做的修复（需管理员身份运行才能接管端口和写 hosts）"
+                                   VerticalAlignment="Center" Opacity="0.6" FontSize="12" TextWrapping="Wrap" />
+                    </StackPanel>
                 </StackPanel>
             </Border>
 

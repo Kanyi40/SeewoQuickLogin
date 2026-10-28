@@ -41,6 +41,9 @@ public class SeewoSsoGateway
     /// <summary>接管期间的紧逼重试间隔（希沃守护进程会在数百毫秒内重启 EasiAgent）。</summary>
     private const int TakeOverRetryMs = 80;
 
+    /// <summary>受信任的希沃后台服务路径后缀：只结束这个路径下的进程，避免误杀同名程序。</summary>
+    private const string TrustedEasiAgentSuffix = @"\Seewo\EasiAgent\EasiAgent.exe";
+
     private readonly object _lifecycleLock = new();
 
     private TcpListener? _listener;
@@ -49,6 +52,9 @@ public class SeewoSsoGateway
 
     /// <summary>登录失败冷却：冷却期内不再打登录接口（防风控）。</summary>
     private readonly ConcurrentDictionary<string, (DateTime AtUtc, string Message)> _failures = new();
+
+    /// <summary>最近一次记录登录页轮询日志的时间（UTC），用于合并高频轮询日志。</summary>
+    private DateTime _lastPollLogUtc = DateTime.MinValue;
 
     /// <summary>最近一次收到希沃 SSOLOGIN 请求的时间（UTC），用于健康自检。</summary>
     public DateTime? LastSsoRequestAtUtc { get; private set; }
@@ -168,6 +174,23 @@ public class SeewoSsoGateway
         _log?.Invoke($"SSO 网关已启动：127.0.0.1:{Port}");
     }
 
+    /// <summary>进程是否为受信任路径下的希沃 EasiAgent（防止误杀同名程序）。</summary>
+    private static bool IsTrustedEasiAgent(Process proc)
+    {
+        try
+        {
+            var path = proc.MainModule?.FileName;
+            if (string.IsNullOrWhiteSpace(path)) return false;
+            var full = Path.GetFullPath(path);
+            return full.EndsWith(TrustedEasiAgentSuffix, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            // 无权限读取其它会话进程的模块信息：按不可信处理（宁可不杀）
+            return false;
+        }
+    }
+
     /// <summary>查询端口占用者描述（用于诊断日志），如「EasiAgent(pid=1234)」「http.sys(系统保留)」。</summary>
     private string DescribePortOwner(int port)
     {
@@ -279,6 +302,11 @@ public class SeewoSsoGateway
                     _log?.Invoke($"端口 {port} 被非希沃进程 {name}(pid={pid}) 占用，不自动结束");
                     return false;
                 }
+                if (!IsTrustedEasiAgent(proc))
+                {
+                    _log?.Invoke($"端口 {port} 被同名但非受信任路径的进程 {name}(pid={pid}) 占用，拒绝结束");
+                    return false;
+                }
 
                 _log?.Invoke($"端口 {port} 被希沃服务 {name}(pid={pid}) 占用，自动结束以接管（希沃会自行重新拉起它）");
                 proc.Kill();
@@ -309,7 +337,8 @@ public class SeewoSsoGateway
                 {
                     try
                     {
-                        return p.ProcessName.StartsWith("EasiAgent", StringComparison.OrdinalIgnoreCase);
+                        return p.ProcessName.StartsWith("EasiAgent", StringComparison.OrdinalIgnoreCase)
+                               && IsTrustedEasiAgent(p);
                     }
                     catch
                     {
@@ -319,7 +348,7 @@ public class SeewoSsoGateway
                 .ToList();
             if (victims.Count == 0)
             {
-                _log?.Invoke("未找到可结束的希沃后台服务（EasiAgent）");
+                _log?.Invoke("未找到可结束的希沃后台服务（受信任路径的 EasiAgent）");
                 return false;
             }
             foreach (var proc in victims)
@@ -362,6 +391,26 @@ public class SeewoSsoGateway
 
     /// <summary>写一条网关日志（供宿主服务记录生命周期事件，便于现场诊断）。</summary>
     public void Note(string message) => _log?.Invoke(message);
+
+    /// <summary>
+    /// 端口存活探测：监听套接字是否真的还能接受连接。
+    /// IsRunning 只是标志位，accept 循环异常退出后标志位仍为 true——需要真实探测才能自愈。
+    /// </summary>
+    public bool ProbeListening()
+    {
+        if (!IsRunning) return false;
+        try
+        {
+            using var client = new TcpClient();
+            var task = client.ConnectAsync(IPAddress.Loopback, Port);
+            if (!task.Wait(600)) return false;
+            return client.Connected;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     // ── 连接循环 ─────────────────────────────────────────────
 
@@ -495,14 +544,28 @@ public class SeewoSsoGateway
 
     private async Task RouteAsync(NetworkStream stream, string method, string path, CancellationToken ct)
     {
-        _log?.Invoke($"请求：{method} {path}");
+        // 白板登录页每 2 秒轮询一次账号列表：只每隔 30 秒记一条，
+        // 否则每天数万行日志既刷屏又持续写盘（班级大屏长期运行会写满日志文件）。
+        if (path.Equals("/getData/SSOLOGIN", StringComparison.OrdinalIgnoreCase))
+        {
+            var now = DateTime.UtcNow;
+            if (_lastPollLogUtc == DateTime.MinValue || (now - _lastPollLogUtc).TotalSeconds >= 30)
+            {
+                _lastPollLogUtc = now;
+                _log?.Invoke($"请求：{method} {path}（登录页轮询中，后续 30 秒内的轮询不再逐条记录）");
+            }
+        }
+        else
+        {
+            _log?.Invoke($"请求：{method} {path}");
+        }
         // GET /getData/SSOLOGIN → 账号列表
         if (method == "GET" && path.Equals("/getData/SSOLOGIN", StringComparison.OrdinalIgnoreCase))
         {
             LastSsoRequestAtUtc = DateTime.UtcNow;
             var settings = _store.Settings;
-            // 配置越界保护：0/负数会让列表恒为空，过大无意义（希沃侧上限 6）
-            var maxVisible = Math.Clamp(settings.MaxVisibleAccounts, 1, 20);
+            // 配置越界保护：0/负数会让列表恒为空；希沃登录页固定只展示 6 个账号，超过无意义
+            var maxVisible = Math.Clamp(settings.MaxVisibleAccounts, 1, 6);
             var accounts = _store.LoadAccounts()
                 .Where(a => !string.IsNullOrEmpty(a.Username))
                 .Take(maxVisible)

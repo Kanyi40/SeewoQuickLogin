@@ -34,6 +34,20 @@ public class SeewoAuthService
 
     private readonly HttpClient _http = new() { Timeout = RequestTimeout };
 
+    /// <summary>
+    /// 直连客户端：系统里残留的代理设置（例如关掉 Clash 后仍指向 127.0.0.1:10809）
+    /// 会让所有请求失败，白板侧表现为「登录信息已过期」。代理不可用时自动改直连重试。
+    /// </summary>
+    private readonly HttpClient _httpDirect = new(new SocketsHttpHandler { UseProxy = false })
+    {
+        Timeout = RequestTimeout
+    };
+
+    /// <summary>直连优先的截止时间（过期后重新给系统代理机会）。</summary>
+    private DateTime _preferDirectUntilUtc = DateTime.MinValue;
+
+    private static readonly TimeSpan DirectPreferenceDuration = TimeSpan.FromMinutes(30);
+
     /// <summary>诊断日志（宿主可选注入；不输出任何敏感信息）。</summary>
     public Action<string>? Diagnostic { get; set; }
 
@@ -125,42 +139,97 @@ public class SeewoAuthService
         }
     }
 
+    // ── 统一出口（代理失败自动改直连）─────────────────────────
+
+    private async Task<(int StatusCode, bool IsSuccess, string Body)> SendAsync(
+        Func<HttpRequestMessage> requestFactory, string tag)
+    {
+        if (DateTime.UtcNow >= _preferDirectUntilUtc)
+        {
+            try
+            {
+                using var request = requestFactory();
+                using var response = await _http.SendAsync(request).ConfigureAwait(false);
+                return ((int)response.StatusCode, response.IsSuccessStatusCode,
+                    await response.Content.ReadAsStringAsync().ConfigureAwait(false));
+            }
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+            {
+                Diagnostic?.Invoke($"{tag} 经系统代理失败（{ex.GetType().Name}），改用直连重试");
+            }
+        }
+
+        using (var request = requestFactory())
+        using (var response = await _httpDirect.SendAsync(request).ConfigureAwait(false))
+        {
+            _preferDirectUntilUtc = DateTime.UtcNow.Add(DirectPreferenceDuration);
+            Diagnostic?.Invoke($"{tag} 使用直连（今后 {DirectPreferenceDuration.TotalMinutes:0} 分钟内优先直连）");
+            return ((int)response.StatusCode, response.IsSuccessStatusCode,
+                await response.Content.ReadAsStringAsync().ConfigureAwait(false));
+        }
+    }
+
     // ── 协议实现 ─────────────────────────────────────────────
+
+    private static HttpRequestMessage BuildLoginRequest(string username, string password, string traceId)
+    {
+        var json = JsonSerializer.Serialize(new
+        {
+            username,
+            password = ComputeMd5(password),
+            captcha = (string?)null,
+            phoneCountryCode = ""
+        });
+
+        var request = new HttpRequestMessage(HttpMethod.Post, LoginUrl)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        };
+        request.Headers.TryAddWithoutValidation("User-Agent", UserAgent);
+        request.Headers.TryAddWithoutValidation("X-APM-TraceId", traceId);
+        request.Headers.TryAddWithoutValidation("Cookie", "x-auth-app=EasiNote5; x-auth-token=");
+        return request;
+    }
+
+    private static HttpRequestMessage BuildUserInfoRequest(string token)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Get, UserInfoUrl);
+        request.Headers.TryAddWithoutValidation("User-Agent", UserAgent);
+        request.Headers.TryAddWithoutValidation("X-auth-refer", "EnAppAndroid");
+        request.Headers.TryAddWithoutValidation("X-Crypto-Version", "1");
+        request.Headers.TryAddWithoutValidation("Cookie", $"x-auth-app=EasiNoteAndroid; x-auth-token={token}");
+        return request;
+    }
+
+    private static HttpRequestMessage BuildExchangeRequest(string oldToken)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Get,
+            TokenExchangeUrl + Uri.EscapeDataString(oldToken) + "/exchange");
+        request.Headers.TryAddWithoutValidation("User-Agent", UserAgent);
+        request.Headers.TryAddWithoutValidation("x-auth-app", "EasiNote5");
+        request.Headers.TryAddWithoutValidation("Cookie", "x-auth-app=EasiNote5");
+        request.Headers.TryAddWithoutValidation("Accept", "application/json");
+        return request;
+    }
 
     private async Task<SeewoLoginResult> LoginCoreAsync(string username, string password)
     {
         try
         {
             var traceId = Guid.NewGuid().ToString("N")[..32];
-            var json = JsonSerializer.Serialize(new
-            {
-                username,
-                password = ComputeMd5(password),
-                captcha = (string?)null,
-                phoneCountryCode = ""
-            });
+            var (status, ok, body) = await SendAsync(
+                () => BuildLoginRequest(username, password, traceId), "登录").ConfigureAwait(false);
 
-            using var request = new HttpRequestMessage(HttpMethod.Post, LoginUrl)
+            if (!ok)
             {
-                Content = new StringContent(json, Encoding.UTF8, "application/json")
-            };
-            request.Headers.TryAddWithoutValidation("User-Agent", UserAgent);
-            request.Headers.TryAddWithoutValidation("X-APM-TraceId", traceId);
-            request.Headers.TryAddWithoutValidation("Cookie", "x-auth-app=EasiNote5; x-auth-token=");
-
-            using var response = await _http.SendAsync(request);
-            var body = await response.Content.ReadAsStringAsync();
-
-            if (!response.IsSuccessStatusCode)
-            {
-                var msg = ReadApiMessage(body) ?? $"HTTP {(int)response.StatusCode}";
-                return SeewoLoginResult.Fail(ClassifyHttpStatus((int)response.StatusCode), msg);
+                var msg = ReadApiMessage(body) ?? $"HTTP {status}";
+                return SeewoLoginResult.Fail(ClassifyHttpStatus(status), msg);
             }
             var result = ParseLoginBody(body);
             if (result.Success)
             {
                 // 登录成功后立即拉取用户资料（昵称 / 头像等），供界面与希沃快捷登录列表展示
-                result.UserInfo = await FetchUserInfoAsync(result.Token);
+                result.UserInfo = await FetchUserInfoAsync(result.Token).ConfigureAwait(false);
             }
             return result;
         }
@@ -217,16 +286,10 @@ public class SeewoAuthService
     {
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, UserInfoUrl);
-            request.Headers.TryAddWithoutValidation("User-Agent", UserAgent);
-            request.Headers.TryAddWithoutValidation("X-auth-refer", "EnAppAndroid");
-            request.Headers.TryAddWithoutValidation("X-Crypto-Version", "1");
-            request.Headers.TryAddWithoutValidation("Cookie",
-                $"x-auth-app=EasiNoteAndroid; x-auth-token={token}");
-            using var response = await _http.SendAsync(request);
-            var body = await response.Content.ReadAsStringAsync();
-            Diagnostic?.Invoke($"user/info HTTP {(int)response.StatusCode} len={body.Length}");
-            if (!response.IsSuccessStatusCode)
+            var (status, ok, body) = await SendAsync(() => BuildUserInfoRequest(token), "user/info")
+                .ConfigureAwait(false);
+            Diagnostic?.Invoke($"user/info HTTP {status} len={body.Length}");
+            if (!ok)
             {
                 Diagnostic?.Invoke($"user/info 失败响应前 120 字符：{body[..Math.Min(120, body.Length)]}");
                 return null;
@@ -277,19 +340,11 @@ public class SeewoAuthService
     {
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get,
-                TokenExchangeUrl + Uri.EscapeDataString(oldToken) + "/exchange");
-            request.Headers.TryAddWithoutValidation("User-Agent", UserAgent);
-            request.Headers.TryAddWithoutValidation("x-auth-app", "EasiNote5");
-            request.Headers.TryAddWithoutValidation("Cookie", "x-auth-app=EasiNote5");
-            request.Headers.TryAddWithoutValidation("Accept", "application/json");
+            var (status, ok, body) = await SendAsync(() => BuildExchangeRequest(oldToken), "token 换发")
+                .ConfigureAwait(false);
 
-            using var response = await _http.SendAsync(request);
-            var body = await response.Content.ReadAsStringAsync();
-
-            if (!response.IsSuccessStatusCode)
-                return SeewoLoginResult.Fail(
-                    ClassifyHttpStatus((int)response.StatusCode), $"HTTP {(int)response.StatusCode}");
+            if (!ok)
+                return SeewoLoginResult.Fail(ClassifyHttpStatus(status), $"HTTP {status}");
 
             using var doc = JsonDocument.Parse(body);
             var root = doc.RootElement;

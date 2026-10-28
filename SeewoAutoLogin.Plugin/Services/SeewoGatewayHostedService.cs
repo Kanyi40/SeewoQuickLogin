@@ -47,7 +47,9 @@ public class SeewoGatewayHostedService : IHostedService
         if (_store.Settings.Enabled)
         {
             EnsureHostsIfEnabled();
-            TryStartGateway();
+            // 首次启动放到后台：端口被 EasiAgent 占用时接管会阻塞数秒，
+            // 不能拖慢 ClassIsland 本身的启动。
+            _ = Task.Run(TryStartGateway, CancellationToken.None);
         }
 
         // 后台守护：网关被外部抢端/启动失败时周期性重试
@@ -103,6 +105,16 @@ public class SeewoGatewayHostedService : IHostedService
                     {
                         _logger?.LogWarning("SSO 网关自动重试仍失败：{Error}", _gateway.LastStartError);
                     }
+                    continue;
+                }
+
+                // 存活自检：IsRunning 只是标志位，accept 循环异常退出后仍为 true。
+                // 真实探测一次本地连接，失败则重启监听（防止"显示运行中但白板拿不到数据"）。
+                if (!_gateway.ProbeListening())
+                {
+                    _gateway.Note($"网关端口 {_gateway.Port} 探测无响应，正在重启监听");
+                    _gateway.Stop();
+                    TryStartGateway();
                     continue;
                 }
 
